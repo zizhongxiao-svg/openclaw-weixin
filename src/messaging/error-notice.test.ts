@@ -236,11 +236,40 @@ describe("host capability and recovery boundaries", () => {
     mocks.drain.mockResolvedValue(undefined);
     await flushWeixinErrorNotices(p);
     const drain = mocks.drain.mock.calls[0][0];
+    const entry = {
+      id: "weixin-error-test",
+      channel: "openclaw-weixin",
+      accountId: "test-account",
+    };
     expect(drain.shouldContinue()).toBe(true);
+    expect(drain.selectEntry(entry)).toEqual({ match: true });
     controller.abort();
     expect(drain.shouldContinue()).toBe(false);
+    expect(drain.selectEntry(entry)).toEqual({ match: false });
     await flushWeixinErrorNotices(p);
     expect(mocks.drain).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops a legacy drain before its next delivery without shouldContinue support", async () => {
+    const controller = new AbortController();
+    const entries = ["first", "second"].map((id) => ({
+      id: `weixin-error-${id}`,
+      channel: "openclaw-weixin",
+      accountId: "test-account",
+    }));
+    const delivered: string[] = [];
+    mocks.drain.mockImplementation(async ({ selectEntry }) => {
+      // The supported 2026.8.1 SDK selects its batch first, then rechecks each
+      // entry at admission. It does not call shouldContinue.
+      const batch = entries.filter((entry) => selectEntry(entry).match);
+      for (const entry of batch) {
+        if (!selectEntry(entry).match) continue;
+        delivered.push(entry.id);
+        controller.abort();
+      }
+    });
+    await flushWeixinErrorNotices({ ...params(), abortSignal: controller.signal });
+    expect(delivered).toEqual(["weixin-error-first"]);
   });
 });
 

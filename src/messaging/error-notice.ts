@@ -191,6 +191,7 @@ export function flushWeixinErrorNotices(params: {
       log: { info: (s) => logger.debug(s), warn: params.errLog, error: params.errLog },
       selectEntry: (entry) => ({
         match:
+          !params.abortSignal?.aborted &&
           entry.channel === "openclaw-weixin" &&
           entry.accountId === params.accountId &&
           entry.id.startsWith(INTENT_PREFIX),
