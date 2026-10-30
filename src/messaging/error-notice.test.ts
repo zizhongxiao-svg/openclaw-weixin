@@ -4,6 +4,13 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(),
   direct: vi.fn(),
   drain: vi.fn(),
+  legacyDrain: vi.fn(),
+  modernLookup: vi.fn(),
+  legacyLookup: vi.fn(),
+  modernDrainAvailable: true,
+  legacyDrainAvailable: true,
+  modernDrainError: undefined as Error | undefined,
+  legacyDrainError: undefined as Error | undefined,
   sdkAvailable: true,
   sdkError: undefined as Error | undefined,
 }));
@@ -13,7 +20,20 @@ vi.mock("openclaw/plugin-sdk/channel-outbound", () => ({
     return mocks.sdkAvailable ? mocks.send : undefined;
   },
 }));
-vi.mock("openclaw/plugin-sdk/infra-runtime", () => ({ drainPendingDeliveries: mocks.drain }));
+vi.mock("openclaw/plugin-sdk/delivery-queue-runtime", () => ({
+  get drainPendingDeliveries() {
+    mocks.modernLookup();
+    if (mocks.modernDrainError) throw mocks.modernDrainError;
+    return mocks.modernDrainAvailable ? mocks.drain : undefined;
+  },
+}));
+vi.mock("openclaw/plugin-sdk/infra-runtime", () => ({
+  get drainPendingDeliveries() {
+    mocks.legacyLookup();
+    if (mocks.legacyDrainError) throw mocks.legacyDrainError;
+    return mocks.legacyDrainAvailable ? mocks.legacyDrain : undefined;
+  },
+}));
 vi.mock("./send.js", () => ({ sendMessageWeixin: mocks.direct }));
 vi.mock("../util/logger.js", () => ({ logger: { debug: vi.fn() } }));
 import { flushWeixinErrorNotices, sendWeixinErrorNotice } from "./error-notice.js";
@@ -31,6 +51,10 @@ const params = () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.sdkAvailable = true;
+  mocks.modernDrainAvailable = true;
+  mocks.legacyDrainAvailable = true;
+  mocks.modernDrainError = undefined;
+  mocks.legacyDrainError = undefined;
   mocks.sdkError = undefined;
 });
 
@@ -216,6 +240,104 @@ describe("host capability and recovery boundaries", () => {
     controller.abort();
     expect(drain.shouldContinue()).toBe(false);
     await flushWeixinErrorNotices(p);
+    expect(mocks.drain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("recovery SDK path compatibility", () => {
+  async function fresh() {
+    vi.resetModules();
+    return import("./error-notice.js");
+  }
+
+  it("prefers the modern recovery export without loading the removed legacy path", async () => {
+    const subject = await fresh();
+    mocks.drain.mockResolvedValue(undefined);
+    await subject.flushWeixinErrorNotices(params());
+    expect(mocks.drain).toHaveBeenCalledTimes(1);
+    expect(mocks.legacyLookup).not.toHaveBeenCalled();
+    expect(mocks.legacyDrain).not.toHaveBeenCalled();
+  });
+
+  it("falls back when an older host has no modern export", async () => {
+    mocks.modernDrainAvailable = false;
+    const subject = await fresh();
+    mocks.legacyDrain.mockResolvedValue(undefined);
+    await subject.flushWeixinErrorNotices(params());
+    expect(mocks.legacyDrain).toHaveBeenCalledTimes(1);
+    expect(mocks.drain).not.toHaveBeenCalled();
+  });
+
+  it.each(["ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_MODULE_NOT_FOUND"])(
+    "falls back when the modern SDK path is unavailable (%s)",
+    async (code) => {
+      mocks.modernDrainError = Object.assign(
+        new Error("Unavailable openclaw/plugin-sdk/delivery-queue-runtime"),
+        { code },
+      );
+      const subject = await fresh();
+      mocks.legacyDrain.mockResolvedValue(undefined);
+      await subject.flushWeixinErrorNotices(params());
+      expect(mocks.legacyDrain).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("recognizes a missing exported target file without hiding unrelated dependencies", async () => {
+    mocks.modernDrainError = Object.assign(
+      new Error("Cannot find module '/host/openclaw/dist/plugin-sdk/delivery-queue-runtime.js'"),
+      { code: "ERR_MODULE_NOT_FOUND" },
+    );
+    const subject = await fresh();
+    mocks.legacyDrain.mockResolvedValue(undefined);
+    await subject.flushWeixinErrorNotices(params());
+    expect(mocks.legacyDrain).toHaveBeenCalledTimes(1);
+  });
+
+  it("caches absent capabilities without logging an error on every poll", async () => {
+    mocks.modernDrainAvailable = false;
+    mocks.legacyDrainAvailable = false;
+    const subject = await fresh();
+    const p = params();
+    await subject.flushWeixinErrorNotices(p);
+    await subject.flushWeixinErrorNotices(p);
+    expect(mocks.modernLookup).toHaveBeenCalledTimes(1);
+    expect(mocks.legacyLookup).toHaveBeenCalledTimes(1);
+    expect(p.errLog).not.toHaveBeenCalled();
+  });
+
+  it("caches both unavailable paths without per-poll loader failures", async () => {
+    mocks.modernDrainError = Object.assign(
+      new Error("Package subpath './plugin-sdk/delivery-queue-runtime' is not exported"),
+      { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" },
+    );
+    mocks.legacyDrainError = Object.assign(
+      new Error("Package subpath './plugin-sdk/infra-runtime' is not exported"),
+      { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" },
+    );
+    const subject = await fresh();
+    const p = params();
+    await subject.flushWeixinErrorNotices(p);
+    await subject.flushWeixinErrorNotices(p);
+    expect(mocks.modernLookup).toHaveBeenCalledTimes(1);
+    expect(mocks.legacyLookup).toHaveBeenCalledTimes(1);
+    expect(p.errLog).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new Error("SDK initialization failed"),
+    Object.assign(new Error("Cannot find package 'broken-transitive-dependency'"), {
+      code: "ERR_MODULE_NOT_FOUND",
+    }),
+  ])("reports a broken SDK load without silently using the legacy path", async (error) => {
+    mocks.modernDrainError = error;
+    const subject = await fresh();
+    const p = params();
+    await subject.flushWeixinErrorNotices(p);
+    expect(p.errLog).toHaveBeenCalledWith(expect.stringContaining(error.message));
+    expect(mocks.legacyLookup).not.toHaveBeenCalled();
+    mocks.modernDrainError = undefined;
+    mocks.drain.mockResolvedValue(undefined);
+    await subject.flushWeixinErrorNotices(p);
     expect(mocks.drain).toHaveBeenCalledTimes(1);
   });
 });

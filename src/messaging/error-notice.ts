@@ -133,16 +133,34 @@ export async function sendWeixinErrorNotice(params: NoticeParams): Promise<Error
 }
 
 let drainPromise: Promise<Drain | undefined> | undefined;
-async function discoverDrain(): Promise<Drain | undefined> {
-  try {
-    const sdk = (await import("openclaw/plugin-sdk/infra-runtime")) as unknown as {
-      drainPendingDeliveries?: Drain;
-    };
-    return sdk.drainPendingDeliveries;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ERR_PACKAGE_PATH_NOT_EXPORTED" || code === "ERR_MODULE_NOT_FOUND") return;
+function loadDrain(): Promise<Drain | undefined> {
+  return (drainPromise ??= discoverDrain().catch((error) => {
+    // Cache unsupported hosts, but let a later poll retry a broken SDK load.
+    drainPromise = undefined;
     throw error;
+  }));
+}
+
+async function discoverDrain(): Promise<Drain | undefined> {
+  for (const specifier of [
+    "openclaw/plugin-sdk/delivery-queue-runtime",
+    "openclaw/plugin-sdk/infra-runtime",
+  ]) {
+    try {
+      const sdk = (await import(specifier)) as { drainPendingDeliveries?: Drain };
+      const drain = sdk.drainPendingDeliveries;
+      if (typeof drain === "function") return drain;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const message = error instanceof Error ? error.message : String(error);
+      const subpath = specifier.slice("openclaw".length);
+      const unavailable =
+        (code === "ERR_PACKAGE_PATH_NOT_EXPORTED" && message.includes(subpath)) ||
+        (code === "ERR_MODULE_NOT_FOUND" &&
+          (message.includes(specifier) || message.includes(`${subpath}.js`)));
+      // Missing transitive dependencies or SDK initialization errors must remain visible.
+      if (!unavailable) throw error;
+    }
   }
 }
 
@@ -159,7 +177,7 @@ export function flushWeixinErrorNotices(params: {
   const existing = activeDrains.get(params.accountId);
   if (existing) return existing;
   const task = (async () => {
-    const drain = await (drainPromise ??= discoverDrain());
+    const drain = await loadDrain();
     if (!drain) return;
     await drain({
       drainKey: `weixin-error:${params.accountId}`,
