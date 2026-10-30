@@ -272,7 +272,11 @@ describe("recovery SDK path compatibility", () => {
     "falls back when the modern SDK path is unavailable (%s)",
     async (code) => {
       mocks.modernDrainError = Object.assign(
-        new Error("Unavailable openclaw/plugin-sdk/delivery-queue-runtime"),
+        new Error(
+          code === "ERR_PACKAGE_PATH_NOT_EXPORTED"
+            ? "Package subpath './plugin-sdk/delivery-queue-runtime' is not defined by exports"
+            : "Cannot find module 'openclaw/plugin-sdk/delivery-queue-runtime' imported from /plugin/error-notice.js",
+        ),
         { code },
       );
       const subject = await fresh();
@@ -328,6 +332,24 @@ describe("recovery SDK path compatibility", () => {
     Object.assign(new Error("Cannot find package 'broken-transitive-dependency'"), {
       code: "ERR_MODULE_NOT_FOUND",
     }),
+    Object.assign(
+      new Error(
+        "Cannot find package 'broken-transitive-dependency' imported from /node_modules/openclaw/dist/plugin-sdk/delivery-queue-runtime.js",
+      ),
+      { code: "ERR_MODULE_NOT_FOUND" },
+    ),
+    Object.assign(
+      new Error(
+        "Cannot find module '/node_modules/openclaw/dist/missing-internal.js' imported from /node_modules/openclaw/dist/plugin-sdk/delivery-queue-runtime.js",
+      ),
+      { code: "ERR_MODULE_NOT_FOUND" },
+    ),
+    Object.assign(
+      new Error(
+        "Package subpath './private' is not defined by exports in /node_modules/dependency/package.json imported from /node_modules/openclaw/dist/plugin-sdk/delivery-queue-runtime.js",
+      ),
+      { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" },
+    ),
   ])("reports a broken SDK load without silently using the legacy path", async (error) => {
     mocks.modernDrainError = error;
     const subject = await fresh();

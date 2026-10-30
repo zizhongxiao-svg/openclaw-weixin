@@ -154,10 +154,15 @@ async function discoverDrain(): Promise<Drain | undefined> {
       const code = (error as NodeJS.ErrnoException).code;
       const message = error instanceof Error ? error.message : String(error);
       const subpath = specifier.slice("openclaw".length);
+      // Match the missing target, never the SDK path mentioned as its importer.
+      const missingSubpath = message.match(/^Package subpath ['"]([^'"]+)['"]/)?.[1];
+      const missingTarget = message
+        .match(/^Cannot find (?:module|package) ['"]([^'"]+)['"]/)?.[1]
+        ?.replaceAll("\\", "/");
       const unavailable =
-        (code === "ERR_PACKAGE_PATH_NOT_EXPORTED" && message.includes(subpath)) ||
+        (code === "ERR_PACKAGE_PATH_NOT_EXPORTED" && missingSubpath === `.${subpath}`) ||
         (code === "ERR_MODULE_NOT_FOUND" &&
-          (message.includes(specifier) || message.includes(`${subpath}.js`)));
+          (missingTarget === specifier || missingTarget?.endsWith(`/openclaw/dist${subpath}.js`)));
       // Missing transitive dependencies or SDK initialization errors must remain visible.
       if (!unavailable) throw error;
     }
